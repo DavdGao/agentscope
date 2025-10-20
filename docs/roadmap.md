@@ -6,7 +6,34 @@ Offering **agent-oriented programming (AOP)** as a new programming paradigm to o
 
 ## Short-term Goals
 
-### AgentScope V1.0.0 Roadmap
+### [2025-10] AgentScope 1.0 Enhancements
+
+Thanks for the community, and AgentScope 1.0 has received great feedback since its release. We are committed to
+continuously improving AgentScope based on user feedback and evolving industry standards.
+In the upcoming months, we plan to focus on the following enhancements:
+
+- RAG
+  - Integrate with popular vector databases (e.g., Milvus)
+  - Support more advanced retrieval techniques (e.g., reranking)
+- Short-term Memory
+  - We have heard from community and decided to provide more flexible short-term memory implementations
+- Tool Control
+  - Support user confirmation/approval before tool execution
+- Improve Implementation
+  - Rewrite these three examples to be implemented in the existing framework of agentscope
+    - Meta Planner
+    - Deep Research
+    - Browser-use
+- Voice Agent
+  - Voice agent is a very attractive scenario. We plan to provide native support for voice agents in AgentScope.
+- Documentation
+  - Add contribution guidelines for community involvement
+  - [PLANNED] AgentScope design book, that provides in-depth explanations of the framework's architecture and design principles
+
+
+
+
+### [2025-09] AgentScope 1.0 Roadmap
 
 We are deeply grateful for the continuous support from the open-source community that has witnessed AgentScope's
 growth. Throughout our journey, we have maintained **developer-centric transparency** as our core principle,
