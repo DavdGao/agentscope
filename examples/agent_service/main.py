@@ -12,6 +12,7 @@ from agentscope.app.rag.knowledge_base_manager import CollectionPerKbManager
 from agentscope.app.storage import RedisStorage
 from agentscope.app.workspace_manager import LocalWorkspaceManager
 from agentscope.mcp import MCPClient, StdioMCPConfig, HttpMCPConfig
+from agentscope.middleware import AgenticMemoryMiddleware
 from agentscope.permission import PermissionContext, PermissionMode
 from agentscope.rag import QdrantStore
 
@@ -38,6 +39,14 @@ if os.getenv("AMAP_API_KEY"):
         ),
     )
 
+
+async def get_middleware(user_id: str, agent_id: str, session_id: str):
+    return [
+        AgenticMemoryMiddleware(
+            workdir=f"/Users/david/workspaces/{agent_id}/"
+        )
+    ]
+
 storage = RedisStorage(
     host="localhost",
     port=6379,
@@ -59,8 +68,8 @@ app = create_app(
     # ),
     workspace_manager=LocalWorkspaceManager(
         basedir=os.path.join(
-            os.path.dirname(os.path.abspath(__file__)),
-            "workspaces",
+            # os.path.dirname(os.path.abspath(__file__)),
+            "/Users/david/workspaces",
         ),
         # The default MCP servers that will be added into the workspace
         default_mcps=default_mcps,
@@ -118,6 +127,7 @@ so anything you want them to see MUST be sent through `TeamSay`.""",
             allow_headers=["*"],
         ),
     ],
+    extra_agent_middlewares=get_middleware
 )
 
 

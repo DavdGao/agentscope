@@ -32,6 +32,7 @@ import { countDiffStats, DiffStats, getResultDiff } from './tool-renderers/_shar
 import type { TFunction, ToolCallWithResult } from './tool-renderers/types';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
+import { Bubble, BubbleContent } from '@/components/ui/bubble.tsx';
 import { Button } from '@/components/ui/button';
 import {
 	Collapsible,
@@ -39,11 +40,13 @@ import {
 	CollapsibleTrigger,
 } from '@/components/ui/collapsible.tsx';
 import { Item, ItemContent } from '@/components/ui/item.tsx';
+import { Message, MessageFooter, MessageContent } from '@/components/ui/message';
 import { useAudioBlock, useReplayController } from '@/context/AudioContext';
 import { useTranslation } from '@/i18n/useI18n';
 import { cn } from '@/lib/utils';
 import { formatNumber, formatTime } from '@/utils/common';
-
+import { Markdown } from '@/components/markdown';
+import "streamdown/styles.css";
 /**
  * A run of *consecutive* tool calls (of any name) collapsed into a single
  * container, each call paired to its result. The one aggregated summary/fold
@@ -646,76 +649,77 @@ export function MessageBubble({ message, onUserConfirm }: MessageBubbleProps) {
 	const elapsedText = formatTime(elapsedSeconds);
 
 	return (
-		<div
-			className={`flex flex-col w-full max-w-full ${isUser ? 'items-end' : 'items-start'} mb-4`}
-		>
-			{showBody && (
-				<div
-					className={`p-4 rounded-xl space-y-2 max-w-full ${
-						isUser ? 'w-fit bg-secondary' : 'w-full min-w-full'
-					}`}
-				>
-					{blocks.map((block, i) =>
-						renderBlock(
-							block,
-							i,
-							t,
-							(
-								toolCall: ToolCallBlock,
-								confirm: boolean,
-								rules?: ToolCallBlock['suggested_rules'],
-							) => {
-								onUserConfirm(toolCall, confirm, message.id, rules);
-								toolCall.state = confirm ? 'allowed' : 'finished';
-							},
-						),
-					)}
-				</div>
-			)}
-			{isError && (
-				<Alert
-					variant="destructive"
-					className="m-2 w-[calc(100%-1rem)] border-red-200 bg-red-50 text-destructive dark:border-red-900 dark:bg-red-950 dark:text-red-50"
-				>
-					<TriangleAlert />
-					<AlertTitle>{t('messageBubble.error.title')}</AlertTitle>
-					<AlertDescription>
-						{t(`messageBubble.error.${errorInfo?.type ?? 'unknown'}`, {
-							defaultValue: errorInfo?.message ?? t('messageBubble.error.unknown'),
-						})}
-					</AlertDescription>
-				</Alert>
-			)}
-			{showFooter && (
-				<div className="flex flex-row items-center text-muted-foreground gap-x-4 px-2 w-full">
-					<Badge
-						variant="secondary"
-						aria-label={isRunning ? t('messageBubble.running') : undefined}
-					>
-						{isRunning ? (
-							<Loader2 data-icon="inline-start" className="animate-spin" />
-						) : (
-							<CheckCircle data-icon="inline-start" />
+		<Message align={isUser ? 'end' : 'start'}>
+			<MessageContent>
+				<Bubble variant={isUser ? 'muted' : 'ghost'}>
+					<BubbleContent>
+						{
+							blocks.map((block, index) => <ASBlock block={block} key={index} />)
+						}
+						{isError && (
+							<Alert
+								variant="destructive"
+								className="m-2 w-[calc(100%-1rem)] border-red-200 bg-red-50 text-destructive dark:border-red-900 dark:bg-red-950 dark:text-red-50"
+							>
+								<TriangleAlert />
+								<AlertTitle>{t('messageBubble.error.title')}</AlertTitle>
+								<AlertDescription>
+									{t(`messageBubble.error.${errorInfo?.type ?? 'unknown'}`, {
+										defaultValue:
+											errorInfo?.message ?? t('messageBubble.error.unknown'),
+									})}
+								</AlertDescription>
+							</Alert>
 						)}
-						<span className="tabular-nums tracking-tighter">{elapsedText}</span>
-						{hasUsage && (
-							<>
-								<ArrowUp data-icon="inline-start" className="ml-1" />
-								<span className="tabular-nums">
-									{formatNumber(message.usage?.input_tokens ?? 0)}
-								</span>
-								<ArrowDown data-icon="inline-start" className="ml-1" />
-								<span className="tabular-nums">
-									{formatNumber(message.usage?.output_tokens ?? 0)}
-								</span>
-							</>
-						)}
-						{audioBlocks.map((block) => (
-							<AudioInlineControl key={block.id} block={block} />
-						))}
-					</Badge>
-				</div>
-			)}
-		</div>
+					</BubbleContent>
+				</Bubble>
+				{showFooter && (
+					<MessageFooter>
+						<Badge
+							variant="secondary"
+							aria-label={isRunning ? t('messageBubble.running') : undefined}
+						>
+							{isRunning ? (
+								<Loader2 data-icon="inline-start" className="animate-spin" />
+							) : (
+								<CheckCircle data-icon="inline-start" />
+							)}
+							<span className="tabular-nums tracking-tighter">{elapsedText}</span>
+							{hasUsage && (
+								<>
+									<ArrowUp data-icon="inline-start" className="ml-1" />
+									<span className="tabular-nums">
+										{formatNumber(message.usage?.input_tokens ?? 0)}
+									</span>
+									<ArrowDown data-icon="inline-start" className="ml-1" />
+									<span className="tabular-nums">
+										{formatNumber(message.usage?.output_tokens ?? 0)}
+									</span>
+								</>
+							)}
+							{audioBlocks.map((block) => (
+								<AudioInlineControl key={block.id} block={block} />
+							))}
+						</Badge>
+					</MessageFooter>
+				)}
+			</MessageContent>
+		</Message>
 	);
+}
+
+
+interface ASBlockProps {
+	block: ExtendedContentBlock;
+}
+
+export function ASBlock({block, ...props}: ASBlockProps) {
+	switch (block.type) {
+		case "text":
+			return <Markdown animated isAnimating={true} caret={"block"} {...props}>
+				{block.text}
+			</Markdown>;
+		default:
+			return null;
+	}
 }
