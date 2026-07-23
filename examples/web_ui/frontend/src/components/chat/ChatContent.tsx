@@ -3,7 +3,7 @@ import { ArrowDown } from 'lucide-react';
 import React from 'react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-import { MessageBubble } from '@/components/chat/MessageBubble';
+import { ASMessageBubble } from '@/components/chat/ASMessageBubble.tsx';
 import { TextInput } from '@/components/chat/TextInput.tsx';
 import { Button } from '@/components/ui/button.tsx';
 import type { ReplyPhase } from '@/hooks/useMessages';
@@ -142,7 +142,7 @@ const ChatContentComponent: React.FC<ChatContentProps> = ({
 							<p className="text-center text-lg mb-2">{t('chat.greeting')}</p>
 						) : (
 							msgs.map((message) => (
-								<MessageBubble
+								<ASMessageBubble
 									key={message.id}
 									message={message}
 									onUserConfirm={onUserConfirm}

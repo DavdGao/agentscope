@@ -6,7 +6,7 @@ from typing import Literal, List, overload, Sequence, Self, TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field, model_validator
 
-from .._utils._common import _generate_id
+from .._utils._common import _generate_id, _generate_timestamp
 from ._block import (
     TextBlock,
     ThinkingBlock,
@@ -299,7 +299,14 @@ class Msg(BaseModel):
                     block.text += event.delta
 
             case EventType.TEXT_BLOCK_END:
-                pass
+                block = self._find_block("text", event.block_id)
+                if block is None:
+                    logger.warning(
+                        "TextBlock %r not found, skipping.",
+                        event.block_id,
+                    )
+                else:
+                    block.finished_at = _generate_timestamp()
 
             case EventType.DATA_BLOCK_START:
                 self.content.append(
@@ -334,7 +341,14 @@ class Msg(BaseModel):
                     ).decode("ascii")
 
             case EventType.DATA_BLOCK_END:
-                pass
+                block = self._find_block("data", event.block_id)
+                if block is None:
+                    logger.warning(
+                        "DataBlock %s not found, skipping.",
+                        event.block_id,
+                    )
+                else:
+                    block.finished_at = _generate_timestamp()
 
             case EventType.THINKING_BLOCK_START:
                 self.content.append(
@@ -352,19 +366,26 @@ class Msg(BaseModel):
                     block.thinking += event.delta
 
             case EventType.THINKING_BLOCK_END:
-                pass
+                block = self._find_block("thinking", event.block_id)
+                if block is None:
+                    logger.warning(
+                        "ThinkingBlock %r not found, skipping.",
+                        event.block_id,
+                    )
+                else:
+                    block.finished_at = _generate_timestamp()
 
             case EventType.HINT_BLOCK:
                 # One-shot event — the full HintBlock content arrives in
                 # a single event, so just append it to ``content`` for
                 # persistence and replay.
-                self.content.append(
-                    HintBlock(
-                        id=event.block_id,
-                        source=event.source,
-                        hint=event.hint,
-                    ),
+                hint_block = HintBlock(
+                    id=event.block_id,
+                    source=event.source,
+                    hint=event.hint,
                 )
+                hint_block.finished_at = hint_block.created_at
+                self.content.append(hint_block)
 
             case EventType.TOOL_CALL_START:
                 self.content.append(
@@ -387,7 +408,14 @@ class Msg(BaseModel):
                     block.input += event.delta
 
             case EventType.TOOL_CALL_END:
-                pass
+                block = self._find_block("tool_call", event.tool_call_id)
+                if block is None:
+                    logger.warning(
+                        "ToolCallBlock %r not found, skipping.",
+                        event.tool_call_id,
+                    )
+                else:
+                    block.finished_at = _generate_timestamp()
 
             case EventType.TOOL_RESULT_START:
                 self.content.append(
@@ -453,6 +481,7 @@ class Msg(BaseModel):
                     assert isinstance(block, ToolResultBlock)
                     block.state = event.state
                     block.metadata = event.metadata
+                    block.finished_at = _generate_timestamp()
                 # The paired ToolCallBlock's lifecycle ends with its
                 # result — flip it to FINISHED here so the SSE-rebuilt
                 # reply_msg matches ``agent.state.context``, which
@@ -504,6 +533,8 @@ class Msg(BaseModel):
                 for result in event.execution_results:
                     if result.id in existing_ids:
                         continue
+                    if result.finished_at is None:
+                        result.finished_at = _generate_timestamp()
                     self.content.append(result)
 
         return self
