@@ -10,21 +10,17 @@ import type {
 import {
 	ArrowDown,
 	ArrowUp,
-	Bot,
-	CalendarClock,
 	CheckCircle,
 	ChevronRight,
 	CirclePlay,
 	FileText,
+	FileVideo2,
 	Loader2,
-	MessageSquareQuote,
 	TriangleAlert,
-	Wrench,
 } from 'lucide-react';
 import * as mime from 'mime-types';
 import { useEffect, useRef, useState } from 'react';
 
-import { ConfirmCard } from './ConfirmCard';
 import { renderToolCall } from './tool-renderers';
 import { countDiffStats, DiffStats, getResultDiff } from './tool-renderers/_shared';
 import type { TFunction, ToolCallWithResult } from './tool-renderers/types';
@@ -40,15 +36,12 @@ import {
 } from '@/components/ui/attachment.tsx';
 import { Badge } from '@/components/ui/badge';
 import { Bubble, BubbleContent } from '@/components/ui/bubble.tsx';
-import { Button } from '@/components/ui/button';
 import {
 	Collapsible,
 	CollapsibleContent,
 	CollapsibleTrigger,
 } from '@/components/ui/collapsible.tsx';
-import { Marker, MarkerContent, MarkerIcon } from '@/components/ui/marker.tsx';
 import { Message, MessageFooter, MessageContent } from '@/components/ui/message';
-import { Spinner } from '@/components/ui/spinner.tsx';
 import { useAudioBlock, useReplayController } from '@/context/AudioContext';
 import { useTranslation } from '@/i18n/useI18n';
 import { cn } from '@/lib/utils';
@@ -64,6 +57,8 @@ import 'streamdown/styles.css';
 interface ToolCallGroupBlock {
 	type: 'tool_call_group';
 	calls: ToolCallWithResult[];
+	created_at?: string;
+	finished_at?: string;
 }
 
 type ExtendedContentBlock = ContentBlock | ToolCallGroupBlock;
@@ -131,6 +126,8 @@ function groupToolCalls(content: ContentBlock[]): ExtendedContentBlock[] {
 						name: block.name,
 						input: '',
 						state: 'finished' as const,
+						created_at: block.created_at,
+						finished_at: block.finished_at,
 					},
 					result: block,
 				},
@@ -292,27 +289,10 @@ function AudioInlineControl({ block }: { block: DataBlock }) {
 	);
 }
 
-type OnUserConfirm = (
-	toolCallBlock: ToolCallBlock,
-	confirm: boolean,
-	rules?: ToolCallBlock['suggested_rules'],
-) => void;
-
 const MCP_TOOL_PREFIX = 'mcp__';
 
 // Task-management tools are all surfaced under one "updated todos" summary.
 const TODO_TOOLS = new Set(['TaskGet', 'TaskUpdate', 'TaskList', 'TaskCreate']);
-
-function renderConfirmCard(askingCall: ToolCallBlock, onUserConfirm?: OnUserConfirm) {
-	return (
-		<ConfirmCard
-			toolCall={askingCall}
-			onUserConfirm={(confirm, rules) => {
-				if (onUserConfirm) onUserConfirm(askingCall, confirm, rules);
-			}}
-		/>
-	);
-}
 
 /**
  * Bucket a group's calls into per-category counts and total inserted/deleted
@@ -445,30 +425,30 @@ export function ASMessageBubble({ message }: MessageBubbleProps) {
 	return (
 		<Message align={isUser ? 'end' : 'start'} data-role={message.role}>
 			<MessageContent>
-				<Bubble variant={isUser ? 'muted' : 'ghost'}>
-					<BubbleContent>
-						{blocks
-							.filter((block) => block.type !== 'data')
-							.map((block, index) => (
+				{blocks
+					.filter((block) => block.type !== 'data')
+					.map((block, index) => (
+						<Bubble variant={isUser ? 'muted' : 'ghost'}>
+							<BubbleContent>
 								<ASBlock block={block} key={index} />
-							))}
-						{isError && (
-							<Alert
-								variant="destructive"
-								className="m-2 w-[calc(100%-1rem)] border-red-200 bg-red-50 text-destructive dark:border-red-900 dark:bg-red-950 dark:text-red-50"
-							>
-								<TriangleAlert />
-								<AlertTitle>{t('messageBubble.error.title')}</AlertTitle>
-								<AlertDescription>
-									{t(`messageBubble.error.${errorInfo?.type ?? 'unknown'}`, {
-										defaultValue:
-											errorInfo?.message ?? t('messageBubble.error.unknown'),
-									})}
-								</AlertDescription>
-							</Alert>
-						)}
-					</BubbleContent>
-				</Bubble>
+							</BubbleContent>
+						</Bubble>
+					))}
+				{isError && (
+					<Alert
+						variant="destructive"
+						className="m-2 w-[calc(100%-1rem)] border-red-200 bg-red-50 text-destructive dark:border-red-900 dark:bg-red-950 dark:text-red-50"
+					>
+						<TriangleAlert />
+						<AlertTitle>{t('messageBubble.error.title')}</AlertTitle>
+						<AlertDescription>
+							{t(`messageBubble.error.${errorInfo?.type ?? 'unknown'}`, {
+								defaultValue:
+									errorInfo?.message ?? t('messageBubble.error.unknown'),
+							})}
+						</AlertDescription>
+					</Alert>
+				)}
 				<AttachmentGroup className="max-w-full">
 					{blocks
 						.filter((block) => block.type === 'data')
@@ -517,6 +497,16 @@ interface ASBlockProps {
 
 export function ASBlock({ block, ...props }: ASBlockProps) {
 	const { t } = useTranslation();
+
+	// Compute time
+	const isRunning = !block.finished_at;
+	const [now, setNow] = useState(() => Date.now());
+	useEffect(() => {
+		if (isRunning) return;
+		const id = setInterval(() => setNow(Date.now()), 1000);
+		return () => clearInterval(id);
+	}, [isRunning]);
+
 	switch (block.type) {
 		case 'text':
 			return (
@@ -543,20 +533,26 @@ export function ASBlock({ block, ...props }: ASBlockProps) {
 								<AttachmentDescription>
 									{(
 										mime.extension(block.source.media_type) || 'bin'
-									).toUpperCase()}{' '}
-									· 12 KB
+									).toUpperCase()}
 								</AttachmentDescription>
 							</AttachmentContent>
 						</Attachment>
 					);
 				case 'video':
 					return (
-						<video
-							controls
-							src={data}
-							className="max-h-80 max-w-full rounded-lg"
-							{...props}
-						/>
+						<Attachment>
+							<AttachmentMedia variant={'icon'}>
+								<FileVideo2 />
+							</AttachmentMedia>
+							<AttachmentContent>
+								<AttachmentTitle>{block.name}</AttachmentTitle>
+								<AttachmentDescription>
+									{(
+										mime.extension(block.source.media_type) || 'bin'
+									).toUpperCase()}
+								</AttachmentDescription>
+							</AttachmentContent>
+						</Attachment>
 					);
 				default:
 					// Unknown files
@@ -570,8 +566,7 @@ export function ASBlock({ block, ...props }: ASBlockProps) {
 								<AttachmentDescription>
 									{(
 										mime.extension(block.source.media_type) || 'bin'
-									).toUpperCase()}{' '}
-									· 12 KB
+									).toUpperCase()}
 								</AttachmentDescription>
 							</AttachmentContent>
 						</Attachment>
@@ -579,20 +574,36 @@ export function ASBlock({ block, ...props }: ASBlockProps) {
 			}
 		}
 		case 'thinking': {
+			const startMs = new Date(block.created_at).getTime();
+			const endMs = isRunning ? now : new Date(block.finished_at!).getTime();
+			const elapsedSeconds = Math.max(0, (endMs - startMs) / 1000);
+			const elapsedText = formatTime(elapsedSeconds);
 			return (
 				<Collapsible>
-					<CollapsibleTrigger className="cursor-pointer">
-						<Marker>
-							<MarkerIcon>
-								<Spinner />
-							</MarkerIcon>
-							<MarkerContent className={'shimmer'}>
-								{t('messageBubble.thinking')}
-							</MarkerContent>
-						</Marker>
+					<CollapsibleTrigger asChild>
+						<div
+							className={cn(
+								'group w-full flex items-center gap-2 text-left text-sm text-muted-foreground cursor-pointer',
+								block.finished_at ? '' : 'shimmer',
+							)}
+						>
+							<span>
+								{t(
+									elapsedText === '0s'
+										? 'messageBubble.thinking'
+										: 'messageBubble.thinkingFor',
+									{ duration: elapsedText },
+								)}
+							</span>
+							<ChevronRight className="hidden group-hover:flex group-data-[state=open]:flex size-3 shrink-0 transition-transform group-data-[state=open]:rotate-90" />
+						</div>
 					</CollapsibleTrigger>
 					<CollapsibleContent asChild>
-						<Markdown animated isAnimating={true} className="text-muted-foreground">
+						<Markdown
+							animated
+							isAnimating={isRunning}
+							className="text-muted-foreground bg-muted p-2 rounded text-sm"
+						>
 							{block.thinking}
 						</Markdown>
 					</CollapsibleContent>
@@ -603,7 +614,6 @@ export function ASBlock({ block, ...props }: ASBlockProps) {
 			// Parse source: try JSON, fall back to plain string, default to t('common.message').
 			let hintLabel: string;
 			let hintSublabel: string | null = null;
-			let HintIcon = MessageSquareQuote;
 
 			if (block.source) {
 				try {
@@ -612,12 +622,9 @@ export function ASBlock({ block, ...props }: ASBlockProps) {
 						sublabel?: string;
 					};
 					hintLabel = parsed.label
-						? t(`messageBubble.hintSource.${parsed.label}`)
+						? t(`messageBubble.hintSource.${parsed.label.toLowerCase()}`)
 						: block.source;
 					hintSublabel = parsed.sublabel ?? null;
-					if (parsed.label === 'team_message') HintIcon = Bot;
-					else if (parsed.label === 'schedule') HintIcon = CalendarClock;
-					else if (parsed.label === 'tool_output') HintIcon = Wrench;
 				} catch {
 					hintLabel = block.source;
 				}
@@ -626,23 +633,29 @@ export function ASBlock({ block, ...props }: ASBlockProps) {
 			}
 			const items: (TextBlock | DataBlock)[] =
 				typeof block.hint === 'string'
-					? [{ type: 'text', id: `${block.id}-text`, text: block.hint }]
+					? [
+							{
+								type: 'text',
+								id: `${block.id}-text`,
+								text: block.hint,
+								created_at: block.created_at,
+							},
+						]
 					: block.hint;
 			return (
 				<Collapsible>
 					<CollapsibleTrigger asChild>
-						<Button className="group w-full max-w-full" variant="ghost">
-							<HintIcon className="size-3.5" />
-							<span className="tracking-tight">{hintLabel}</span>
-							{hintSublabel && (
-								<span className="text-muted-foreground font-normal truncate max-w-[200px]">
-									{hintSublabel}
-								</span>
+						<div
+							className={cn(
+								'group w-full flex gap-2 items-center text-sm text-muted-foreground cursor-pointer hover:text-primary',
+								isRunning && 'shimmer',
 							)}
-							<ChevronRight className="ml-auto group-data-[state=open]:rotate-90" />
-						</Button>
+						>
+							<span>{hintLabel + (hintSublabel ? ` - ${hintSublabel}` : '')}</span>
+							<ChevronRight className="size-3 shrink-0 transition-transform group-data-[state=open]:rotate-90" />
+						</div>
 					</CollapsibleTrigger>
-					<CollapsibleContent asChild>
+					<CollapsibleContent className="bg-muted p-2 rounded text-sm">
 						{items.map((item, index) => (
 							<ASBlock block={item} key={index} />
 						))}
@@ -656,26 +669,18 @@ export function ASBlock({ block, ...props }: ASBlockProps) {
 			return (
 				<Collapsible defaultOpen={false}>
 					<CollapsibleTrigger asChild>
-						<Button
-							variant="ghost"
-							className="text-muted-foreground group flex w-full items-center justify-between gap-2 px-0 hover:bg-transparent data-[state=open]:bg-transparent active:!translate-y-0 cursor-pointer"
-							{...props}
-						>
-							<span
-								className={cn(
-									'flex min-w-0 items-center gap-2',
-									allFinished && 'shimmer',
-								)}
-							>
-								<span className="truncate text-sm">{title}</span>
-								<ChevronRight className="size-3 shrink-0 transition-transform group-data-[state=open]:rotate-90" />
-							</span>
-							{(insertions > 0 || deletions > 0) && (
-								<DiffStats insertions={insertions} deletions={deletions} />
+						<div
+							className={cn(
+								'group w-full flex gap-2 items-center text-sm text-muted-foreground cursor-pointer hover:text-primary',
+								allFinished && 'shimmer',
 							)}
-						</Button>
+						>
+							<span>{title}</span>
+							<ChevronRight className="size-3 shrink-0 transition-transform group-data-[state=open]:rotate-90" />
+							<DiffStats insertions={insertions} deletions={deletions} />
+						</div>
 					</CollapsibleTrigger>
-					<CollapsibleContent className="flex flex-col gap-y-1 bg-muted p-2 rounded text-sm">
+					<CollapsibleContent className="flex flex-col w-full gap-y-1 bg-muted p-2 rounded text-sm text-muted-foreground">
 						{block.calls.map((pair) => renderToolCall(pair, t))}
 					</CollapsibleContent>
 				</Collapsible>

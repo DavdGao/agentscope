@@ -73,7 +73,8 @@ def _generate_id() -> str:
 
 
 def _generate_timestamp() -> str:
-    """Generate a timestamp string using the current global timestamp factory."""
+    """Generate a timestamp string using the current global
+    timestamp factory."""
     return _timestamp_factory()
 
 
