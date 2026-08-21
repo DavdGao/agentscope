@@ -546,7 +546,7 @@ class DingTalkChannelTest(  # pylint: disable=too-many-public-methods
             await channel.chat_kind(event.chat_id),
             ChatKind.GROUP,
         )
-        self.assertEqual(await channel.chat_name(event.chat_id), "Engineering")
+        self.assertEqual(event.chat_name, "Engineering")
 
     async def test_private_text_callback_uses_staff_id(self) -> None:
         channel = _channel()
@@ -565,9 +565,11 @@ class DingTalkChannelTest(  # pylint: disable=too-many-public-methods
             await channel.chat_kind(received[0].chat_id),
             ChatKind.PRIVATE,
         )
-        self.assertEqual(await channel.chat_name("user:user-1"), "Alice")
 
-    async def test_list_bot_chats_returns_only_observed_targets(self) -> None:
+    async def test_no_bot_chats_to_enumerate(self) -> None:
+        """DingTalk exposes no robot-chat listing, and the answer has to
+        hold on a process that never received a callback — the gateway's
+        record of observed chats is what feeds the routing UI."""
         channel = _channel()
         await _message_callbacks(
             channel,
@@ -575,21 +577,7 @@ class DingTalkChannelTest(  # pylint: disable=too-many-public-methods
             _payload(conversationType="1", conversationTitle=""),
         )
 
-        self.assertEqual(
-            await channel.list_bot_chats(),
-            [
-                {
-                    "chat_id": "group:cid-group-1",
-                    "name": "Engineering",
-                    "chat_type": "group",
-                },
-                {
-                    "chat_id": "user:user-1",
-                    "name": "Alice",
-                    "chat_type": "private",
-                },
-            ],
-        )
+        self.assertListEqual(await channel.list_bot_chats(), [])
 
     async def test_group_message_without_mention_is_ignored(self) -> None:
         channel = _channel(only_at_reply=True)
@@ -704,34 +692,6 @@ class DingTalkChannelTest(  # pylint: disable=too-many-public-methods
         )
 
         self.assertIn("Unable to download", received[0].message)
-
-    async def test_unsafe_session_webhook_is_not_cached(self) -> None:
-        channel = _channel()
-        received = await _message_callbacks(
-            channel,
-            _payload(sessionWebhook="https://example.com/steal"),
-        )
-
-        self.assertEqual(len(received), 1)
-        self.assertNotIn(received[0].chat_id, channel._session_webhooks)
-
-    async def test_send_response_uses_cached_session_webhook(self) -> None:
-        channel = _channel()
-        received = await _message_callbacks(channel, _payload())
-        http = _FakeHTTP()
-        channel._http = http
-
-        await channel.send_response(received[0], _event_stream())
-
-        self.assertEqual(len(http.posts), 1)
-        url, request = http.posts[0]
-        self.assertEqual(url, _WEBHOOK)
-        self.assertEqual(request["json"]["msgtype"], "markdown")
-        self.assertEqual(
-            request["json"]["markdown"]["text"],
-            "hello from agent",
-        )
-        self.assertEqual(request["json"]["markdown"]["title"], "AgentScope")
 
     async def test_streaming_is_disabled_without_ai_card_template(
         self,
@@ -963,7 +923,6 @@ class DingTalkToolTest(IsolatedAsyncioTestCase):
 
     async def test_list_tools_forms_discovery_send_chain(self) -> None:
         from agentscope.app.channel._dingtalk._tools import (
-            ListConversations,
             ListUsers,
             SendFile,
             SendMessage,
@@ -979,7 +938,6 @@ class DingTalkToolTest(IsolatedAsyncioTestCase):
             },
         ]
         channel, _ = _channel_with_openapi(media_api)
-        channel._chat_names["group:cid-2"] = "Finance"
         backend = _FakeBackend({"/workspace/report.pdf": b"pdf"})
         workspace = cast(WorkspaceBase, _FakeWorkspace(backend))
 
@@ -988,25 +946,21 @@ class DingTalkToolTest(IsolatedAsyncioTestCase):
         self.assertEqual(
             [tool.name for tool in tools],
             [
-                "ListConversations",
                 "ListUsers",
                 "SendMessage",
                 "SendFile",
                 "SendImage",
             ],
         )
-        conversations = await cast(ListConversations, tools[0])()
-        conversation_items = json.loads(conversations.content[0].text)
-        self.assertEqual(conversation_items[0]["target"], "group:cid-2")
-        users = await cast(ListUsers, tools[1])("Bob", 10)
+        users = await cast(ListUsers, tools[0])("Bob", 10)
         user_items = json.loads(users.content[0].text)
         self.assertEqual(user_items[0]["target"], "user:user-2")
 
-        message_result = await cast(SendMessage, tools[2])(
+        message_result = await cast(SendMessage, tools[1])(
             "user:user-2",
             "hello",
         )
-        file_result = await cast(SendFile, tools[3])(
+        file_result = await cast(SendFile, tools[2])(
             "/workspace/report.pdf",
             "group:cid-2",
         )
@@ -1044,51 +998,24 @@ class DingTalkToolTest(IsolatedAsyncioTestCase):
 
         self.assertEqual(
             [tool.name for tool in tools],
-            ["ListConversations", "ListUsers"],
+            ["ListUsers"],
         )
 
 
 class DingTalkChannelLifecycleTest(IsolatedAsyncioTestCase):
     """DingTalk reply-webhook and connection lifecycle tests."""
 
-    async def test_expired_session_webhook_is_not_used(self) -> None:
+    async def test_lifecycle_stops_the_stream_client(self) -> None:
         channel = _channel()
-        received = await _message_callbacks(
-            channel,
-            _payload(
-                sessionWebhookExpiredTime=int(time.time() * 1000) - 1,
-            ),
-        )
-        http = _FakeHTTP()
-        channel._http = http
-
-        sent = await channel._send_text(received[0].chat_id, "late reply")
-
-        self.assertFalse(sent)
-        self.assertEqual(http.posts, [])
-
-    async def test_missing_webhook_falls_back_to_openapi(self) -> None:
-        channel, media_api = _channel_with_openapi()
-
-        sent = await channel._send_text("group:cid-2", "fallback")
-
-        self.assertTrue(sent)
-        self.assertEqual(
-            media_api.text_calls,
-            [("group:cid-2", "fallback")],
-        )
-
-    async def test_lifecycle_stops_stream_and_http_clients(self) -> None:
-        channel = _channel()
-        http = _FakeHTTP()
         stream = _FakeStreamClient()
 
         async def emit(event: ChannelEvent) -> None:
             del event
 
-        with (
-            patch.object(channel, "_new_http_client", return_value=http),
-            patch.object(channel, "_new_stream_client", return_value=stream),
+        with patch.object(
+            channel,
+            "_new_stream_client",
+            return_value=stream,
         ):
             listener = asyncio.create_task(channel.start_listening(emit))
             await asyncio.wait_for(stream.started.wait(), timeout=1.0)
@@ -1099,23 +1026,18 @@ class DingTalkChannelLifecycleTest(IsolatedAsyncioTestCase):
                 await listener
 
         self.assertEqual(stream.stop_calls, 1)
-        self.assertTrue(http.closed)
         self.assertEqual(channel.status.state, "stopped")
 
     async def test_lifecycle_parks_after_initialisation_failure(self) -> None:
         channel = _channel()
-        http = _FakeHTTP()
 
         async def emit(event: ChannelEvent) -> None:
             del event
 
-        with (
-            patch.object(channel, "_new_http_client", return_value=http),
-            patch.object(
-                channel,
-                "_new_stream_client",
-                side_effect=RuntimeError("bad credentials"),
-            ),
+        with patch.object(
+            channel,
+            "_new_stream_client",
+            side_effect=RuntimeError("bad credentials"),
         ):
             listener = asyncio.create_task(channel.start_listening(emit))
             for _ in range(20):
@@ -1129,8 +1051,23 @@ class DingTalkChannelLifecycleTest(IsolatedAsyncioTestCase):
             with self.assertRaises(asyncio.CancelledError):
                 await listener
 
-        self.assertTrue(http.closed)
         self.assertEqual(channel.status.state, "stopped")
+
+    async def test_outbound_works_without_ever_connecting(self) -> None:
+        """``ChannelClients`` builds instances that never listen, and
+        every agent tool on them goes out over REST."""
+        channel = _channel()
+        http = _FakeHTTP()
+
+        with patch("httpx.AsyncClient", return_value=http):
+            api = channel._ensure_openapi()
+            self.assertIs(channel._ensure_openapi(), api)
+
+        self.assertIsNone(channel._stream_client)
+        self.assertFalse(http.closed)
+
+        await channel.aclose()
+        self.assertTrue(http.closed)
 
 
 class DingTalkOpenAPITest(IsolatedAsyncioTestCase):
