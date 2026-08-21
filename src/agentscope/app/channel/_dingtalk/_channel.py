@@ -12,7 +12,14 @@ import binascii
 import json
 import mimetypes
 import time
-from typing import Any, AsyncIterator, Awaitable, Callable, TYPE_CHECKING
+from typing import (
+    Any,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Coroutine,
+    TYPE_CHECKING,
+)
 from urllib.parse import quote_plus
 
 from pydantic import BaseModel, Field
@@ -53,6 +60,9 @@ _CARD_CALLBACK_TOPIC = "/v1.0/card/instances/callback"
 _GROUP_CONVERSATION = "2"
 _MAX_LEN = 4000
 _STATUS_POLL_INTERVAL = 0.2
+# Give up (and park in 'failed') after this many connects that never
+# came up -- the credentials are bad, mirroring the other channels.
+_MAX_CONNECT_ATTEMPTS = 2
 _STREAM_MIN_INTERVAL = 0.3
 _STREAM_MAX_CONTENT_BYTES = 1024
 _STREAM_FALLBACK_NOTICE = (
@@ -169,6 +179,7 @@ class DingTalkChannel(ChannelBase):
         )
         self.status = ChannelStatus()
         self._stream_client: Any = None
+        self._callbacks: set[asyncio.Task[Any]] = set()
         self._http: Any = None
         self._openapi: _DingTalkOpenAPI | None = None
         self._emit: (
@@ -209,12 +220,22 @@ class DingTalkChannel(ChannelBase):
             self._stream_client = self._new_stream_client()
             stream_task = asyncio.create_task(self._stream_client.start())
             while not stream_task.done():
-                if getattr(self._stream_client, "websocket", None) is not None:
+                client = self._stream_client
+                if getattr(client, "websocket", None) is not None:
                     ever_connected = True
                     self.status.state = "connected"
                     self.status.last_error = ""
                 elif ever_connected:
                     self.status.state = "retrying"
+                    self.status.last_error = client.last_error
+                elif client.failed_attempts >= _MAX_CONNECT_ATTEMPTS:
+                    # Never connected: the credentials or the app's
+                    # Stream permission are wrong, and retrying cannot
+                    # fix either. Say so instead of showing 'connecting'
+                    # for as long as the process lives.
+                    raise RuntimeError(
+                        client.last_error or "connect failed",
+                    )
                 await asyncio.sleep(_STATUS_POLL_INTERVAL)
             await stream_task
             if self.status.state != "stopped":
@@ -246,6 +267,9 @@ class DingTalkChannel(ChannelBase):
             # The REST client is not the connection's to close: the
             # outbound half is used with or without one, and its
             # lifetime belongs to ``aclose``.
+            for task in list(self._callbacks):
+                task.cancel()
+            await asyncio.gather(*self._callbacks, return_exceptions=True)
             self._stream_client = None
             self.status.state = "stopped"
 
@@ -573,6 +597,39 @@ class DingTalkChannel(ChannelBase):
             media_type,
         )
 
+    def _spawn_callback(
+        self,
+        coro: "Coroutine[Any, Any, None]",
+        kind: str,
+    ) -> None:
+        """Handle one inbound callback after acknowledging it.
+
+        DingTalk expects an acknowledgement within seconds and re-pushes
+        the event otherwise, while handling one can take much longer:
+        a message may carry media to download, and a card click resolves
+        a session, resumes its run, and updates the card. So the work is
+        detached and the handler acknowledges straight away.
+
+        Args:
+            coro (`Coroutine`): The handler to run.
+            kind (`str`): ``message`` or ``card``, for the log line.
+        """
+
+        async def _run() -> None:
+            """Run the handler, logging rather than raising."""
+            try:
+                await coro
+            except Exception:  # pylint: disable=broad-except
+                logger.exception(
+                    "DingTalk '%s' %s callback failed",
+                    self._channel_id,
+                    kind,
+                )
+
+        task = asyncio.create_task(_run())
+        self._callbacks.add(task)
+        task.add_done_callback(self._callbacks.discard)
+
     def _ensure_openapi(self) -> _DingTalkOpenAPI:
         """Return the OpenAPI client, creating it on first use.
 
@@ -609,9 +666,9 @@ class DingTalkChannel(ChannelBase):
         import dingtalk_stream  # type: ignore[import-untyped]
         import websockets  # type: ignore[import-untyped]
 
-        channel = self
         on_callback = self._on_callback
         on_card_callback = self._on_card_callback
+        spawn = self._spawn_callback
 
         class _StoppableStreamClient(
             dingtalk_stream.DingTalkStreamClient,
@@ -630,6 +687,12 @@ class DingTalkChannel(ChannelBase):
                 self._stop_event = asyncio.Event()
                 self._worker_tasks: set[asyncio.Task[Any]] = set()
                 self._keepalive_task: asyncio.Task[Any] | None = None
+                # Consecutive attempts that never reached a connection,
+                # and the reason the last one gave. Bad credentials
+                # never succeed, so the owner watches these to decide
+                # when retrying is pointless.
+                self.failed_attempts = 0
+                self.last_error = ""
 
             async def start(self) -> None:
                 """Connect and reconnect until :meth:`stop` is called."""
@@ -640,6 +703,10 @@ class DingTalkChannel(ChannelBase):
                             self.open_connection,
                         )
                         if not connection:
+                            self.failed_attempts += 1
+                            self.last_error = (
+                                "the platform refused the connection"
+                            )
                             await self._retry_after(10.0)
                             continue
                         uri = (
@@ -648,6 +715,8 @@ class DingTalkChannel(ChannelBase):
                         )
                         async with websockets.connect(uri) as websocket:
                             self.websocket = websocket
+                            self.failed_attempts = 0
+                            self.last_error = ""
                             self._keepalive_task = asyncio.create_task(
                                 self.keepalive(websocket),
                             )
@@ -673,9 +742,12 @@ class DingTalkChannel(ChannelBase):
                                 "DingTalk Stream connection closed: %s",
                                 error,
                             )
+                            self.last_error = str(error)
                             await self._retry_after(10.0)
                     except Exception as error:  # pylint: disable=broad-except
                         if not self._stop_event.is_set():
+                            self.failed_attempts += 1
+                            self.last_error = str(error)
                             self.logger.warning(
                                 "DingTalk Stream connection failed: %s",
                                 error,
@@ -727,20 +799,10 @@ class DingTalkChannel(ChannelBase):
                     callback (`Any`): The Stream SDK callback message.
 
                 Returns:
-                    `tuple[int, str]`: DingTalk acknowledgement status and
-                    message.
+                    `tuple[int, str]`: The acknowledgement, sent before
+                    the work is done -- see :meth:`_spawn_callback`.
                 """
-                try:
-                    await on_callback(callback.data)
-                except Exception:  # pylint: disable=broad-except
-                    logger.exception(
-                        "DingTalk '%s' callback failed",
-                        channel.channel_id,
-                    )
-                    return (
-                        dingtalk_stream.AckMessage.STATUS_SYSTEM_EXCEPTION,
-                        "ERROR",
-                    )
+                spawn(on_callback(callback.data), "message")
                 return dingtalk_stream.AckMessage.STATUS_OK, "OK"
 
         class _CardHandler(dingtalk_stream.CallbackHandler):
@@ -753,20 +815,10 @@ class DingTalkChannel(ChannelBase):
                     callback (`Any`): The Stream SDK callback message.
 
                 Returns:
-                    `tuple[int, str]`: DingTalk acknowledgement status and
-                    message.
+                    `tuple[int, str]`: The acknowledgement, sent before
+                    the work is done -- see :meth:`_spawn_callback`.
                 """
-                try:
-                    await on_card_callback(callback.data)
-                except Exception:  # pylint: disable=broad-except
-                    logger.exception(
-                        "DingTalk '%s' card callback failed",
-                        channel.channel_id,
-                    )
-                    return (
-                        dingtalk_stream.AckMessage.STATUS_SYSTEM_EXCEPTION,
-                        "ERROR",
-                    )
+                spawn(on_card_callback(callback.data), "card")
                 return dingtalk_stream.AckMessage.STATUS_OK, "OK"
 
         credential = dingtalk_stream.Credential(
@@ -806,7 +858,9 @@ class DingTalkChannel(ChannelBase):
                 tool.id,
                 event.chat_id,
                 tool.name,
-                tool.input,
+                # ``input`` is a dict; the card takes text, and the
+                # length cap below counts characters, not keys.
+                str(tool.input),
                 approver_id,
                 str(event.metadata.get("agent_id") or ""),
                 str(event.metadata.get("session_id") or ""),

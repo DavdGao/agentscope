@@ -7,7 +7,7 @@ import base64
 import json
 import time
 from typing import Any, AsyncIterator, cast
-from unittest import IsolatedAsyncioTestCase
+from unittest import IsolatedAsyncioTestCase, TestCase
 from unittest.mock import patch
 from uuid import UUID
 
@@ -38,6 +38,7 @@ from agentscope.message import (
 )
 from agentscope.permission import PermissionBehavior, PermissionContext
 from agentscope.workspace import WorkspaceBase
+from agentscope.app.channel._dingtalk._card import _approval_card_data
 
 _REPLY_ID = "reply-1"
 _WEBHOOK = "https://oapi.dingtalk.com/robot/sendBySession?session=secret"
@@ -74,11 +75,13 @@ class _FakeHTTP:
 class _FakeStreamClient:
     """A cancellable stand-in for the official Stream client."""
 
-    def __init__(self) -> None:
-        self.websocket: object | None = object()
+    def __init__(self, connects: bool = True) -> None:
+        self.websocket: object | None = object() if connects else None
         self.started = asyncio.Event()
         self._stopped = asyncio.Event()
         self.stop_calls = 0
+        self.failed_attempts = 0 if connects else 5
+        self.last_error = "" if connects else "bad credentials"
 
     async def start(self) -> None:
         self.started.set()
@@ -1028,6 +1031,36 @@ class DingTalkChannelLifecycleTest(IsolatedAsyncioTestCase):
         self.assertEqual(stream.stop_calls, 1)
         self.assertEqual(channel.status.state, "stopped")
 
+    async def test_credentials_that_never_connect_end_in_failed(
+        self,
+    ) -> None:
+        """The client retries a refused connection forever, so without
+        this the channel would show 'connecting' for the life of the
+        process instead of naming a fixable configuration error."""
+        channel = _channel()
+        stream = _FakeStreamClient(connects=False)
+
+        async def emit(event: ChannelEvent) -> None:
+            del event
+
+        with patch.object(
+            channel,
+            "_new_stream_client",
+            return_value=stream,
+        ):
+            listener = asyncio.create_task(channel.start_listening(emit))
+            for _ in range(50):
+                if channel.status.state == "failed":
+                    break
+                await asyncio.sleep(0.01)
+
+            self.assertEqual(channel.status.state, "failed")
+            self.assertEqual(channel.status.last_error, "bad credentials")
+            self.assertFalse(listener.done())
+            listener.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await listener
+
     async def test_lifecycle_parks_after_initialisation_failure(self) -> None:
         channel = _channel()
 
@@ -1368,3 +1401,22 @@ class DingTalkOpenAPITest(IsolatedAsyncioTestCase):
 
         self.assertFalse(sent)
         self.assertEqual(http.posts, [])
+
+
+class DingTalkApprovalCardTest(TestCase):
+    """The approval card's argument preview stays within template limits."""
+
+    def test_long_arguments_are_truncated(self) -> None:
+        """A tool call's ``input`` is a dict, so measuring it directly
+        counts keys and lets an arbitrarily large payload through into a
+        card parameter the platform then rejects."""
+        card = _approval_card_data(
+            "tool-1",
+            "group:cid-1",
+            "SendMessage",
+            str({"text": "x" * 5000}),
+            "user-1",
+        )
+
+        self.assertLessEqual(len(card["markdown"]), 900)
+        self.assertTrue(card["markdown"].endswith("…"))
