@@ -7,6 +7,7 @@ import base64
 import json
 import time
 from typing import Any, AsyncIterator, cast
+from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase, TestCase
 from unittest.mock import patch
 from uuid import UUID
@@ -35,6 +36,7 @@ from agentscope.message import (
     DataBlock,
     TextBlock,
     ToolCallBlock,
+    ToolResultState,
 )
 from agentscope.permission import PermissionBehavior, PermissionContext
 from agentscope.workspace import WorkspaceBase
@@ -193,6 +195,12 @@ class _FakeBackend:
     def __init__(self, files: dict[str, bytes] | None = None) -> None:
         self.files = files or {}
         self.reads: list[str] = []
+
+    async def stat(self, path: str) -> Any:
+        """Report a file's size without reading it."""
+        if path not in self.files:
+            return None
+        return SimpleNamespace(size_bytes=len(self.files[path]))
 
     async def read_file(self, path: str) -> bytes:
         self.reads.append(path)
@@ -662,6 +670,9 @@ class DingTalkChannelTest(  # pylint: disable=too-many-public-methods
         self.assertEqual(audio.source.media_type, "audio/mpeg")
 
     async def test_rich_text_preserves_text_image_order(self) -> None:
+        """Fragments keep their own whitespace: they are concatenated to
+        form the message, so trimming each one would run the words
+        either side of an image together."""
         channel, _ = _channel_with_openapi()
         received = await _message_callbacks(
             channel,
@@ -669,9 +680,9 @@ class DingTalkChannelTest(  # pylint: disable=too-many-public-methods
                 msgtype="richText",
                 content={
                     "richText": [
-                        {"text": "before"},
+                        {"text": "look at this "},
                         {"downloadCode": "rich-image", "type": "picture"},
-                        {"text": "after"},
+                        {"text": " and tell me"},
                     ],
                 },
             ),
@@ -680,7 +691,10 @@ class DingTalkChannelTest(  # pylint: disable=too-many-public-methods
         self.assertIsInstance(received[0].content[0], TextBlock)
         self.assertIsInstance(received[0].content[1], DataBlock)
         self.assertIsInstance(received[0].content[2], TextBlock)
-        self.assertEqual(received[0].message, "beforeafter")
+        self.assertEqual(
+            received[0].message,
+            "look at this  and tell me",
+        )
 
     async def test_media_download_failure_is_visible(self) -> None:
         channel, _ = _channel_with_openapi(
@@ -971,6 +985,27 @@ class DingTalkToolTest(IsolatedAsyncioTestCase):
         self.assertIn("Sent message", message_result.content[0].text)
         self.assertIn("Sent file", file_result.content[0].text)
         self.assertEqual(backend.reads, ["/workspace/report.pdf"])
+
+    async def test_oversized_file_is_refused_before_it_is_read(
+        self,
+    ) -> None:
+        """The channel checks the size again after, but by then the
+        bytes are already in memory — a limit that only applies then is
+        not limiting anything."""
+        from agentscope.app.channel._dingtalk._tools import SendFile
+
+        channel, _ = _channel_with_openapi(_FakeMediaOpenAPI())
+        limit = channel.max_media_bytes
+        backend = _FakeBackend({"/workspace/big.zip": b"x" * (limit + 1)})
+
+        result = await SendFile(channel, cast(Any, backend))(
+            "/workspace/big.zip",
+            "user:user-2",
+        )
+
+        self.assertEqual(result.state, ToolResultState.ERROR)
+        self.assertIn("larger than", result.content[0].text)
+        self.assertListEqual(backend.reads, [])
 
     async def test_dingtalk_tool_permissions_match_feishu_policy(self) -> None:
         channel = _channel()

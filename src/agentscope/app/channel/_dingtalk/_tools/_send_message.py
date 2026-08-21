@@ -8,6 +8,8 @@ from ._base import _ack, _DingTalkToolBase
 
 
 class _SendMessageParams(ParamsBase):
+    """Arguments for sending Markdown to a DingTalk target."""
+
     target: str = Field(
         pattern=r"^(user|group):.+$",
         description="Encoded target returned by ListConversations or "

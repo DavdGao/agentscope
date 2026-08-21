@@ -11,6 +11,8 @@ from ._base import _ack, _DingTalkToolBase
 
 
 class _SendImageParams(ParamsBase):
+    """Arguments for sending a workspace image to a target."""
+
     path: str = Field(
         description="Absolute path to an image in the calling workspace.",
     )
@@ -43,6 +45,23 @@ requires confirmation."""
         Returns:
             `ToolChunk`: DingTalk acceptance or workspace error.
         """
+        # Refuse an oversized file before reading it: the channel
+        # checks again after, but a limit that only applies once the
+        # bytes are in memory does not limit anything.
+        entry = await self._backend.stat(path)
+        limit = self._channel.max_media_bytes
+        if entry is not None and (entry.size_bytes or 0) > limit:
+            return ToolChunk(
+                content=[
+                    TextBlock(
+                        text=(
+                            f"SendImage: {path!r} is larger than the "
+                            f"{limit}-byte limit."
+                        ),
+                    ),
+                ],
+                state=ToolResultState.ERROR,
+            )
         try:
             raw = await self._backend.read_file(path)
         except Exception as error:  # pylint: disable=broad-except

@@ -630,6 +630,16 @@ class DingTalkChannel(ChannelBase):
         self._callbacks.add(task)
         task.add_done_callback(self._callbacks.discard)
 
+    @property
+    def max_media_bytes(self) -> int:
+        """The largest payload this channel will send or receive.
+
+        Public so the file-send tools can refuse an oversized workspace
+        file before reading it: the send-side check below still runs,
+        but by then the bytes are already in memory.
+        """
+        return self._config.max_media_bytes
+
     def _ensure_openapi(self) -> _DingTalkOpenAPI:
         """Return the OpenAPI client, creating it on first use.
 
@@ -1028,7 +1038,10 @@ class DingTalkChannel(ChannelBase):
         for item in items:
             if not isinstance(item, dict):
                 continue
-            text = str(item.get("text") or "").strip()
+            # Keep each fragment verbatim: the blocks are concatenated
+            # to form the message, so stripping here would join the
+            # words either side of an image into one.
+            text = str(item.get("text") or "")
             if text:
                 blocks.append(TextBlock(text=text))
             download_code = str(item.get("downloadCode") or "")

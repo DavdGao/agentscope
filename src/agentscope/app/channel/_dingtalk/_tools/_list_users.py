@@ -11,6 +11,8 @@ from ._base import _DingTalkToolBase
 
 
 class _ListUsersParams(ParamsBase):
+    """Arguments for searching the DingTalk directory."""
+
     query: str = Field(
         min_length=1,
         description="User name to search for in the DingTalk directory.",

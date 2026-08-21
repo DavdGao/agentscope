@@ -125,18 +125,21 @@ async def _direct(timeout: float) -> bool:
     channel = _channel("dingtalk-direct-e2e")
     completed = asyncio.Event()
     results: dict[str, bool] = {}
+    # Only successful steps are recorded, so a run that stopped early
+    # leaves a dict that is entirely True. The verdict has to name what
+    # it expected rather than ask whether anything present passed.
+    required = (
+        "inbound_text",
+        "conversation",
+        "user_search",
+        "target_text",
+        "target_image",
+        "target_file",
+        "inbound_image",
+        "inbound_file",
+    )
 
     def maybe_complete() -> None:
-        required = (
-            "inbound_text",
-            "conversation",
-            "user_search",
-            "target_text",
-            "target_image",
-            "target_file",
-            "inbound_image",
-            "inbound_file",
-        )
         if all(results.get(key) for key in required):
             completed.set()
 
@@ -240,7 +243,7 @@ async def _direct(timeout: float) -> bool:
         "send a direct text message, then one image and one PDF",
         timeout,
     )
-    return finished and all(results.values())
+    return finished and all(results.get(key) for key in required)
 
 
 async def _group(timeout: float) -> bool:
