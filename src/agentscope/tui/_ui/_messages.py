@@ -25,7 +25,7 @@ from textual.timer import Timer
 from textual.widget import Widget
 from textual.widgets import Collapsible, Markdown, Static
 
-from ..message import (
+from ...message import (
     Base64Source,
     ContentBlock,
     DataBlock,
@@ -35,73 +35,6 @@ from ..message import (
     ToolCallBlock,
     ToolResultBlock,
 )
-
-
-def _elapsed(created_at: str, finished_at: str | None) -> str:
-    """Return a compact elapsed time for an ISO timestamp pair."""
-    try:
-        started = datetime.fromisoformat(created_at).timestamp()
-        ended = (
-            datetime.fromisoformat(finished_at).timestamp()
-            if finished_at
-            else datetime.now().timestamp()
-        )
-    except ValueError:
-        return ""
-    seconds = max(0.0, ended - started)
-    if seconds < 10:
-        return f"{seconds:.1f}s"
-    if seconds < 60:
-        return f"{seconds:.0f}s"
-    minutes, remainder = divmod(int(seconds), 60)
-    return f"{minutes}m {remainder:02d}s"
-
-
-def _human_size(n_bytes: int) -> str:
-    size = float(n_bytes)
-    for unit in ("B", "KB", "MB"):
-        if size < 1024:
-            return f"{size:.0f}{unit}"
-        size /= 1024
-    return f"{size:.1f}GB"
-
-
-def _pretty_json(raw: str) -> str:
-    raw = raw.strip()
-    if not raw:
-        return "{}"
-    try:
-        return json.dumps(json.loads(raw), ensure_ascii=False, indent=2)
-    except ValueError:
-        return raw
-
-
-def _result_text(result: ToolResultBlock | None) -> str:
-    if result is None:
-        return ""
-    if isinstance(result.output, str):
-        return result.output
-    parts: list[str] = []
-    for block in result.output:
-        if isinstance(block, TextBlock):
-            parts.append(block.text)
-        else:
-            parts.append(_attachment_label(block))
-    return "\n".join(parts)
-
-
-def _attachment_label(block: DataBlock) -> str:
-    source = block.source
-    if isinstance(source, Base64Source):
-        try:
-            size = len(base64.b64decode(source.data, validate=False))
-        except ValueError:
-            size = len(source.data) * 3 // 4
-        location = _human_size(size)
-    else:
-        location = str(source.url)
-    name = block.name or "attachment"
-    return f"{name} · {source.media_type} · {location}"
 
 
 class TextBlockUI(Markdown):
@@ -165,7 +98,24 @@ class ThinkingUI(Collapsible):
             self._timer = self.set_interval(1.0, self._update_title)
 
     def _title_text(self) -> str:
-        elapsed = _elapsed(self.block.created_at, self.block.finished_at)
+        elapsed = ""
+        try:
+            started = datetime.fromisoformat(self.block.created_at).timestamp()
+            ended = (
+                datetime.fromisoformat(self.block.finished_at).timestamp()
+                if self.block.finished_at
+                else datetime.now().timestamp()
+            )
+            seconds = max(0.0, ended - started)
+            if seconds < 10:
+                elapsed = f"{seconds:.1f}s"
+            elif seconds < 60:
+                elapsed = f"{seconds:.0f}s"
+            else:
+                minutes, remainder = divmod(int(seconds), 60)
+                elapsed = f"{minutes}m {remainder:02d}s"
+        except ValueError:
+            pass
         prefix = (
             "◌ Thinking" if self.block.finished_at is None else "◆ Thought"
         )
@@ -187,9 +137,10 @@ class AttachmentUI(Static):
 
     def __init__(self, block: DataBlock) -> None:
         self.block = block
-        super().__init__(self._render_block(), classes="as-attachment")
+        super().__init__(classes="as-attachment")
 
-    def _render_block(self) -> RenderableType:
+    def render(self) -> RenderableType:
+        """Render attachment metadata without exposing inline media data."""
         media_type = self.block.source.media_type
         category = media_type.split("/", maxsplit=1)[0]
         icon = {
@@ -202,10 +153,19 @@ class AttachmentUI(Static):
         source = self.block.source
         if isinstance(source, Base64Source):
             try:
-                size = len(base64.b64decode(source.data, validate=False))
+                size = float(
+                    len(base64.b64decode(source.data, validate=False)),
+                )
             except ValueError:
-                size = len(source.data) * 3 // 4
-            label.append(f"  {_human_size(size)}", style="dim")
+                size = float(len(source.data) * 3 // 4)
+            for unit in ("B", "KB", "MB"):
+                if size < 1024:
+                    size_label = f"{size:.0f}{unit}"
+                    break
+                size /= 1024
+            else:
+                size_label = f"{size:.1f}GB"
+            label.append(f"  {size_label}", style="dim")
         else:
             url = str(source.url)
             label.append("  open", style=f"underline link {url}")
@@ -215,7 +175,7 @@ class AttachmentUI(Static):
 
     def replace(self, block: DataBlock) -> None:
         self.block = block
-        self.update(self._render_block())
+        self.refresh()
 
 
 @dataclass
@@ -261,20 +221,18 @@ def _group_tool_calls(content: Iterable[ContentBlock]) -> list[_DisplayBlock]:
     grouped: list[_DisplayBlock] = []
     pending: list[_ToolPair] = []
 
-    def flush() -> None:
-        if pending:
-            grouped.append(_ToolGroup(list(pending)))
-            pending.clear()
-
     for item in ordering:
         if isinstance(item, tuple):
             pair = call_map.get(item[1])
             if pair is not None:
                 pending.append(pair)
         else:
-            flush()
+            if pending:
+                grouped.append(_ToolGroup(list(pending)))
+                pending.clear()
             grouped.append(item)
-    flush()
+    if pending:
+        grouped.append(_ToolGroup(list(pending)))
 
     for result in orphan_results:
         grouped.append(
@@ -295,104 +253,6 @@ def _group_tool_calls(content: Iterable[ContentBlock]) -> list[_DisplayBlock]:
     return grouped
 
 
-def _diff_stats(diff: str) -> tuple[int, int]:
-    insertions = 0
-    deletions = 0
-    for line in diff.splitlines():
-        if line.startswith("+") and not line.startswith("+++"):
-            insertions += 1
-        elif line.startswith("-") and not line.startswith("---"):
-            deletions += 1
-    return insertions, deletions
-
-
-def _file_path(call: ToolCallBlock) -> str | None:
-    try:
-        value = json.loads(call.input).get("file_path")
-    except (AttributeError, ValueError):
-        return None
-    return value if isinstance(value, str) else None
-
-
-def _tool_body(pair: _ToolPair) -> RenderableType:
-    """Return the built-in detail rendering for one tool invocation."""
-    items: list[RenderableType] = []
-    compact_result_only = pair.call.name == "Read"
-    if pair.call.input.strip() and not compact_result_only:
-        items.append(Text("input", style="dim"))
-        items.append(
-            Syntax(
-                _pretty_json(pair.call.input),
-                "json",
-                word_wrap=True,
-                background_color="default",
-            ),
-        )
-    result = pair.result
-    if result is None:
-        items.append(Text("Waiting for result…", style="dim italic"))
-        return Group(*items)
-
-    output = _result_text(result)
-    name = pair.call.name
-    diff = result.metadata.get("diff")
-    rendered: RenderableType
-    if compact_result_only:
-        rendered = Text(output or "(no output)", style="dim")
-    elif name in ("Edit", "Write") and isinstance(diff, str) and diff:
-        rendered = Syntax(
-            diff,
-            "diff",
-            word_wrap=False,
-            background_color="default",
-        )
-    elif name == "Bash":
-        rendered = Syntax(
-            output,
-            "console",
-            word_wrap=True,
-            background_color="default",
-        )
-    else:
-        rendered = Text(output or "(no output)", style="dim")
-    state_style = {
-        "success": "dim",
-        "error": "bold",
-        "denied": "dim italic",
-        "interrupted": "dim italic",
-        "running": "dim italic",
-    }.get(str(result.state), "dim")
-    if not compact_result_only:
-        items.append(Text(f"output · {result.state}", style=state_style))
-    items.append(rendered)
-    return Group(*items)
-
-
-def _tool_title(
-    pair: _ToolPair,
-    *,
-    show_running_icon: bool = True,
-) -> str:
-    state = pair.result.state if pair.result is not None else "running"
-    icon, style = _TOOL_STATE_STYLES.get(str(state), ("·", ""))
-    path = _file_path(pair.call)
-    primary = os.path.basename(path) if path else ""
-    details = f" {escape(primary)}" if primary else ""
-    if pair.call.name in ("Edit", "Write") and pair.result is not None:
-        diff = pair.result.metadata.get("diff")
-        if isinstance(diff, str) and diff:
-            added, removed = _diff_stats(diff)
-            details += f"  +{added} -{removed}"
-    icon_prefix = f"{icon} " if show_running_icon or state != "running" else ""
-    name = escape(pair.call.name)
-    styled_tool = (
-        f"[{style}]{icon_prefix}[bold]{name}[/bold][/]"
-        if style
-        else f"{icon_prefix}[bold]{name}[/bold]"
-    )
-    return f"{styled_tool}{details}"
-
-
 class ToolCallUI(Vertical):
     """One flat tool call/result row inside an expanded tool group."""
 
@@ -402,58 +262,126 @@ class ToolCallUI(Vertical):
         self.show_title = show_title
 
     def compose(self) -> ComposeResult:
+        pair = self.pair
         if self.show_title:
-            yield Static(
-                _tool_title(self.pair),
-                classes="as-tool-call-title",
+            state = pair.result.state if pair.result is not None else "running"
+            icon, style = _TOOL_STATE_STYLES.get(str(state), ("·", ""))
+            try:
+                path = json.loads(pair.call.input).get("file_path")
+            except (AttributeError, ValueError):
+                path = None
+            if not isinstance(path, str):
+                path = None
+            primary = os.path.basename(path) if path else ""
+            details = f" {escape(primary)}" if primary else ""
+            if pair.call.name in ("Edit", "Write") and pair.result is not None:
+                diff = pair.result.metadata.get("diff")
+                if isinstance(diff, str) and diff:
+                    added = sum(
+                        line.startswith("+") and not line.startswith("+++")
+                        for line in diff.splitlines()
+                    )
+                    removed = sum(
+                        line.startswith("-") and not line.startswith("---")
+                        for line in diff.splitlines()
+                    )
+                    details += f"  +{added} -{removed}"
+            icon_prefix = f"{icon} "
+            name = escape(pair.call.name)
+            styled_tool = (
+                f"[{style}]{icon_prefix}[bold]{name}[/bold][/]"
+                if style
+                else f"{icon_prefix}[bold]{name}[/bold]"
             )
-        yield Static(_tool_body(self.pair), classes="as-tool-body")
+            title = f"{styled_tool}{details}"
+            yield Static(title, classes="as-tool-call-title")
+        items: list[RenderableType] = []
+        arguments = pair.call.input.strip() or "{}"
+        try:
+            arguments = json.dumps(
+                json.loads(arguments),
+                ensure_ascii=False,
+                indent=2,
+            )
+        except ValueError:
+            pass
+        compact_result_only = pair.call.name == "Read"
+        if pair.call.input.strip() and not compact_result_only:
+            items.append(Text("input", style="dim"))
+            items.append(
+                Syntax(
+                    arguments,
+                    "json",
+                    word_wrap=True,
+                    background_color="default",
+                ),
+            )
+        result = pair.result
+        if result is None:
+            items.append(Text("Waiting for result…", style="dim italic"))
+            yield Static(Group(*items), classes="as-tool-body")
+            return
 
-
-def _tool_group_state(group: _ToolGroup) -> str:
-    states = {
-        (str(pair.result.state) if pair.result is not None else "running")
-        for pair in group.calls
-    }
-    for state in ("error", "denied", "interrupted", "running"):
-        if state in states:
-            return state
-    return "success"
-
-
-def _tool_group_title(group: _ToolGroup, *, expanded: bool = False) -> str:
-    state = _tool_group_state(group)
-    _, style = _TOOL_STATE_STYLES[state]
-    disclosure = "↓" if expanded else "→"
-    if len(group.calls) == 1:
-        return (
-            f"[{style}]{disclosure}[/] "
-            f"{_tool_title(group.calls[0], show_running_icon=False)}"
-        )
-    counts: dict[str, int] = {}
-    added = 0
-    removed = 0
-    for pair in group.calls:
-        counts[pair.call.name] = counts.get(pair.call.name, 0) + 1
-        if pair.result is not None:
-            diff = pair.result.metadata.get("diff")
-            if isinstance(diff, str):
-                pair_added, pair_removed = _diff_stats(diff)
-                added += pair_added
-                removed += pair_removed
-    pieces = [
-        f"{name} ×{count}" if count > 1 else name
-        for name, count in counts.items()
-    ]
-    summary = ", ".join(pieces) or "Tools"
-    if added or removed:
-        summary += f"  +{added} -{removed}"
-    icon, _ = _TOOL_STATE_STYLES[state]
-    result_prefix = "" if state == "running" else f"{icon} "
-    return (
-        f"[{style}]{disclosure} {result_prefix}"
-        f"[bold]{escape(summary)}[/bold][/]"
-    )
+        if isinstance(result.output, str):
+            output = result.output
+        else:
+            parts = []
+            for item in result.output:
+                if isinstance(item, TextBlock):
+                    parts.append(item.text)
+                    continue
+                source = item.source
+                if isinstance(source, Base64Source):
+                    try:
+                        size = float(
+                            len(base64.b64decode(source.data, validate=False)),
+                        )
+                    except ValueError:
+                        size = float(len(source.data) * 3 // 4)
+                    for unit in ("B", "KB", "MB"):
+                        if size < 1024:
+                            location = f"{size:.0f}{unit}"
+                            break
+                        size /= 1024
+                    else:
+                        location = f"{size:.1f}GB"
+                else:
+                    location = str(source.url)
+                name = item.name or "attachment"
+                parts.append(f"{name} · {source.media_type} · {location}")
+            output = "\n".join(parts)
+        name = pair.call.name
+        diff = result.metadata.get("diff")
+        rendered: RenderableType
+        if compact_result_only:
+            rendered = Text(output or "(no output)", style="dim")
+        elif name in ("Edit", "Write") and isinstance(diff, str) and diff:
+            rendered = Syntax(
+                diff,
+                "diff",
+                word_wrap=False,
+                background_color="default",
+            )
+        elif name == "Bash":
+            rendered = Syntax(
+                output,
+                "console",
+                word_wrap=True,
+                background_color="default",
+            )
+        else:
+            rendered = Text(output or "(no output)", style="dim")
+        state_style = {
+            "success": "dim",
+            "error": "bold",
+            "denied": "dim italic",
+            "interrupted": "dim italic",
+            "running": "dim italic",
+        }.get(str(result.state), "dim")
+        if not compact_result_only:
+            items.append(Text(f"output · {result.state}", style=state_style))
+        items.append(rendered)
+        yield Static(Group(*items), classes="as-tool-body")
 
 
 class ToolGroupUI(Collapsible):
@@ -471,16 +399,94 @@ class ToolGroupUI(Collapsible):
                 ),
                 classes="as-tool-list",
             ),
-            title=_tool_group_title(group),
+            title="",
             collapsed=True,
             collapsed_symbol="",
             expanded_symbol="",
             classes="as-tool-group",
         )
+        self._watch_collapsed(self.collapsed)
 
     def _watch_collapsed(self, collapsed: bool) -> None:
         super()._watch_collapsed(collapsed)
-        self.title = _tool_group_title(self.group, expanded=not collapsed)
+        group = self.group
+        states = {
+            str(pair.result.state) if pair.result is not None else "running"
+            for pair in group.calls
+        }
+        state = next(
+            (
+                value
+                for value in ("error", "denied", "interrupted", "running")
+                if value in states
+            ),
+            "success",
+        )
+        _, style = _TOOL_STATE_STYLES[state]
+        disclosure = "→" if collapsed else "↓"
+        if len(group.calls) == 1:
+            pair = group.calls[0]
+            state = pair.result.state if pair.result is not None else "running"
+            icon, style = _TOOL_STATE_STYLES.get(str(state), ("·", ""))
+            try:
+                path = json.loads(pair.call.input).get("file_path")
+            except (AttributeError, ValueError):
+                path = None
+            if not isinstance(path, str):
+                path = None
+            primary = os.path.basename(path) if path else ""
+            details = f" {escape(primary)}" if primary else ""
+            if pair.call.name in ("Edit", "Write") and pair.result is not None:
+                diff = pair.result.metadata.get("diff")
+                if isinstance(diff, str) and diff:
+                    added = sum(
+                        line.startswith("+") and not line.startswith("+++")
+                        for line in diff.splitlines()
+                    )
+                    removed = sum(
+                        line.startswith("-") and not line.startswith("---")
+                        for line in diff.splitlines()
+                    )
+                    details += f"  +{added} -{removed}"
+            icon_prefix = f"{icon} " if state != "running" else ""
+            name = escape(pair.call.name)
+            styled_tool = (
+                f"[{style}]{icon_prefix}[bold]{name}[/bold][/]"
+                if style
+                else f"{icon_prefix}[bold]{name}[/bold]"
+            )
+            title = f"{styled_tool}{details}"
+            self.title = f"[{style}]{disclosure}[/] {title}"
+            return
+        counts: dict[str, int] = {}
+        added = 0
+        removed = 0
+        for pair in group.calls:
+            counts[pair.call.name] = counts.get(pair.call.name, 0) + 1
+            if pair.result is not None:
+                diff = pair.result.metadata.get("diff")
+                if isinstance(diff, str):
+                    added += sum(
+                        line.startswith("+") and not line.startswith("+++")
+                        for line in diff.splitlines()
+                    )
+                    removed += sum(
+                        line.startswith("-") and not line.startswith("---")
+                        for line in diff.splitlines()
+                    )
+        pieces = [
+            f"{name} ×{count}" if count > 1 else name
+            for name, count in counts.items()
+        ]
+        summary = ", ".join(pieces) or "Tools"
+        if added or removed:
+            summary += f"  +{added} -{removed}"
+        icon, _ = _TOOL_STATE_STYLES[state]
+        result_prefix = "" if state == "running" else f"{icon} "
+        self.title = (
+            f"[{style}]{disclosure} {result_prefix}"
+            f"[bold]{escape(summary)}[/bold][/]"
+        )
 
 
 class MessageUI(Vertical):
@@ -503,31 +509,31 @@ class MessageUI(Vertical):
 
     def compose(self) -> ComposeResult:
         self._block_uis = {}
-        yield Static(self._header_text(), classes="as-message-header")
+        yield Static(
+            Rule(
+                Text(self.message.name, style="bold #d8b66f"),
+                characters="─",
+                style="#766b5b",
+                align="left",
+            ),
+            classes="as-message-header",
+        )
         for block in _group_tool_calls(self.message.content):
             widget = self._make_block_ui(block)
             if widget is not None:
                 yield widget
         if self.message.role == "assistant":
-            footer_content = self._footer_text()
             self._footer = Static(
-                footer_content,
+                "",
                 classes="as-message-footer",
             )
-            self._footer.display = bool(footer_content.plain)
+            self._footer.display = False
             yield self._footer
         else:
             self._footer = None
 
-    def _header_text(self) -> Rule:
-        return Rule(
-            Text(self.message.name, style="bold #d8b66f"),
-            characters="─",
-            style="#766b5b",
-            align="left",
-        )
-
     def on_mount(self) -> None:
+        self._update_footer()
         if (
             self.message.role == "assistant"
             and self.message.finished_at is None
@@ -555,18 +561,39 @@ class MessageUI(Vertical):
                 self._block_uis[call_id] = widget
             return widget
         if block.type == "hint":
-            text = (
-                block.hint
-                if isinstance(block.hint, str)
-                else "\n".join(
-                    (
-                        item.text
-                        if isinstance(item, TextBlock)
-                        else _attachment_label(item)
-                    )
-                    for item in block.hint
-                )
-            )
+            if isinstance(block.hint, str):
+                text = block.hint
+            else:
+                parts = []
+                for item in block.hint:
+                    if isinstance(item, TextBlock):
+                        parts.append(item.text)
+                        continue
+                    source = item.source
+                    if isinstance(source, Base64Source):
+                        try:
+                            size = float(
+                                len(
+                                    base64.b64decode(
+                                        source.data,
+                                        validate=False,
+                                    ),
+                                ),
+                            )
+                        except ValueError:
+                            size = float(len(source.data) * 3 // 4)
+                        for unit in ("B", "KB", "MB"):
+                            if size < 1024:
+                                location = f"{size:.0f}{unit}"
+                                break
+                            size /= 1024
+                        else:
+                            location = f"{size:.1f}GB"
+                    else:
+                        location = str(source.url)
+                    name = item.name or "attachment"
+                    parts.append(f"{name} · {source.media_type} · {location}")
+                text = "\n".join(parts)
             source = f" from {block.source}" if block.source else ""
             widget = Collapsible(
                 Markdown(text, classes="as-hint-body"),
@@ -580,7 +607,9 @@ class MessageUI(Vertical):
             return widget
         return None
 
-    def _footer_text(self) -> Text:
+    def _update_footer(self) -> None:
+        if self._footer is None:
+            return
         running = self.message.finished_at is None
         text = Text()
         if running:
@@ -601,19 +630,19 @@ class MessageUI(Vertical):
                 f"  {self.message.error.type}: {self.message.error.message}",
                 style="bold",
             )
-        return text
-
-    def _update_footer(self) -> None:
-        if self._footer is not None:
-            content = self._footer_text()
-            self._footer.update(content)
-            self._footer.display = bool(content.plain)
+        self._footer.update(text)
+        self._footer.display = bool(text.plain)
 
     async def apply(self, message: Msg) -> None:
         previous = self.message
         self.message = message
         self.query_one(".as-message-header", Static).update(
-            self._header_text(),
+            Rule(
+                Text(self.message.name, style="bold #d8b66f"),
+                characters="─",
+                style="#766b5b",
+                align="left",
+            ),
         )
         self._update_footer()
         if message.finished_at is not None and self._timer is not None:
@@ -873,16 +902,13 @@ class MessagesUI(VerticalScroll):
     def compose(self) -> ComposeResult:
         self._message_uis = {}
         for message in self._messages:
-            widget = self._new_message_ui(message)
+            widget = MessageUI(
+                message,
+                show_thinking=self.show_thinking,
+                show_usage=self.show_usage,
+            )
             self._message_uis[message.id] = widget
             yield widget
-
-    def _new_message_ui(self, message: Msg) -> MessageUI:
-        return MessageUI(
-            message,
-            show_thinking=self.show_thinking,
-            show_usage=self.show_usage,
-        )
 
     async def set_messages(self, messages: Sequence[Msg]) -> None:
         """Reconcile an authoritative full conversation snapshot."""
@@ -905,7 +931,11 @@ class MessagesUI(VerticalScroll):
         for message in copied:
             widget = self._message_uis.get(message.id)
             if widget is None:
-                widget = self._new_message_ui(message)
+                widget = MessageUI(
+                    message,
+                    show_thinking=self.show_thinking,
+                    show_usage=self.show_usage,
+                )
                 self._message_uis[message.id] = widget
                 await self.mount(widget)
             elif previous_by_id[message.id] != message:
@@ -928,7 +958,11 @@ class MessagesUI(VerticalScroll):
         if previous is None:
             self._indices[copied.id] = len(self._messages)
             self._messages.append(copied)
-            widget = self._new_message_ui(copied)
+            widget = MessageUI(
+                copied,
+                show_thinking=self.show_thinking,
+                show_usage=self.show_usage,
+            )
             self._message_uis[copied.id] = widget
             await self.mount(widget)
         else:

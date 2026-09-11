@@ -20,12 +20,12 @@ from textual.widget import Widget
 from textual.widgets import Collapsible, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 
-from ..event import (
+from ...event import (
     ConfirmResult,
     ExternalExecutionResultEvent,
     UserConfirmResultEvent,
 )
-from ..message import Msg, ToolCallBlock, ToolCallState, UserMsg
+from ...message import Msg, ToolCallBlock, ToolCallState, UserMsg
 from ._ask_user import AskUserUI
 from ._messages import MessagesUI
 
@@ -112,14 +112,12 @@ class ComposerUI(Vertical):
             return
         editor = self.query_one(_ComposerTextArea)
         editor.disabled = not enabled
-        self._update_hint()
+        self.set_running_reply(self._running_reply_id)
 
     def set_running_reply(self, reply_id: str | None) -> None:
         self._running_reply_id = reply_id
-        if self.is_mounted:
-            self._update_hint()
-
-    def _update_hint(self) -> None:
+        if not self.is_mounted:
+            return
         if not self._enabled:
             hint = "Input disabled"
         else:
@@ -136,7 +134,8 @@ class ComposerUI(Vertical):
         self.set_enabled(self._enabled)
         self.set_running_reply(self._running_reply_id)
 
-    def _submit(self) -> None:
+    @on(_ComposerTextArea.SubmitRequested)
+    def _on_editor_submit(self) -> None:
         if not self._enabled:
             return
         editor = self.query_one(_ComposerTextArea)
@@ -145,10 +144,6 @@ class ComposerUI(Vertical):
             return
         editor.load_text("")
         self.post_message(self.Submitted(value))
-
-    @on(_ComposerTextArea.SubmitRequested)
-    def _on_editor_submit(self) -> None:
-        self._submit()
 
     @on(_ComposerTextArea.InterruptRequested)
     def _on_interrupt(self) -> None:
@@ -243,14 +238,14 @@ class HitlUI(Vertical):
         self._choice_labels = [label for label, _ in choice_specs]
         choices = [
             Option(
-                self._choice_prompt(choice_index, label, choice_index == 0),
+                f"  {choice_index + 1}. {label}",
                 id=key,
             )
             for choice_index, (label, key) in enumerate(choice_specs)
         ]
         options.clear_options().add_options(choices)
         options.highlighted = 0
-        self._refresh_choice_prompts()
+        self._on_option_highlighted()
         options.disabled = self._submitting
         hint = (
             "Submitting…"
@@ -259,21 +254,14 @@ class HitlUI(Vertical):
         )
         self.query_one("#as-hitl-hint", Static).update(hint)
 
-    @staticmethod
-    def _choice_prompt(index: int, label: str, selected: bool) -> str:
-        marker = "→" if selected else " "
-        return f"{marker} {index + 1}. {label}"
-
-    def _refresh_choice_prompts(self) -> None:
+    @on(OptionList.OptionHighlighted, "#as-hitl-options")
+    def _on_option_highlighted(self) -> None:
         options = self.query_one(OptionList)
         for index, label in enumerate(self._choice_labels):
             options.replace_option_prompt_at_index(
                 index,
-                self._choice_prompt(
-                    index,
-                    label,
-                    index == options.highlighted,
-                ),
+                f"{'→' if index == options.highlighted else ' '} "
+                f"{index + 1}. {label}",
             )
 
     def _confirm(self, confirmed: bool, always: bool = False) -> None:
@@ -319,10 +307,6 @@ class HitlUI(Vertical):
             self._confirm(False)
         elif event.option_id == "interrupt":
             self._interrupt()
-
-    @on(OptionList.OptionHighlighted, "#as-hitl-options")
-    def _on_option_highlighted(self) -> None:
-        self._refresh_choice_prompts()
 
     def on_key(self, event: events.Key) -> None:
         if not self._pending or self._submitting:
@@ -502,9 +486,6 @@ class ChatUI(Widget):
     def messages(self) -> tuple[Msg, ...]:
         return self.query_one(MessagesUI).messages
 
-    def _current_messages(self) -> tuple[Msg, ...]:
-        return tuple(self._active_messages.values())
-
     def is_reply_parked(self, reply_id: str) -> bool:
         """Whether a reply is waiting for confirmation or external input."""
         return any(
@@ -515,7 +496,7 @@ class ChatUI(Widget):
                 in (ToolCallState.ASKING, ToolCallState.SUBMITTED)
                 for block in message.content
             )
-            for message in self._current_messages()
+            for message in tuple(self._active_messages.values())
         )
 
     async def set_messages(self, messages: Sequence[Msg]) -> None:
@@ -540,10 +521,13 @@ class ChatUI(Widget):
         if self.is_mounted:
             self.query_one(ComposerUI).set_enabled(enabled)
 
-    def _pending_tools(self) -> list[tuple[str, str, ToolCallBlock]]:
+    def _sync_interaction_area(self) -> None:
+        composer = self.query_one(ComposerUI)
+        hitl = self.query_one(HitlUI)
+        ask_user = self.query_one(AskUserUI)
         pending: list[tuple[str, str, ToolCallBlock]] = []
         pending_ids: set[str] = set()
-        for message in self._current_messages():
+        for message in tuple(self._active_messages.values()):
             if message.role != "assistant" or message.finished_at is not None:
                 continue
             for block in message.content:
@@ -555,45 +539,36 @@ class ChatUI(Widget):
                     if block.id not in self._dismissed_call_ids:
                         pending.append((message.id, message.name, block))
         self._dismissed_call_ids.intersection_update(pending_ids)
-        return pending
 
-    def _latest_running_reply_id(self) -> str | None:
-        for message in reversed(self._current_messages()):
-            if message.role == "assistant" and message.finished_at is None:
-                return message.id
-        return None
-
-    def _sync_interaction_area(self) -> None:
-        composer = self.query_one(ComposerUI)
-        hitl = self.query_one(HitlUI)
-        ask_user = self.query_one(AskUserUI)
-        pending = self._pending_tools()
         ask_pending: list[tuple[str, str, ToolCallBlock]] = []
         hitl_pending: list[tuple[str, str, ToolCallBlock]] = []
-        ask_user_first = bool(pending and self._is_ask_user(pending[0][2]))
+        ask_user_first = bool(
+            pending
+            and pending[0][2].name == _ASK_USER_TOOL_NAME
+            and pending[0][2].state == ToolCallState.SUBMITTED,
+        )
         active_pending = ask_pending if ask_user_first else hitl_pending
         for item in pending:
-            if self._is_ask_user(item[2]) != ask_user_first:
+            is_ask_user = (
+                item[2].name == _ASK_USER_TOOL_NAME
+                and item[2].state == ToolCallState.SUBMITTED
+            )
+            if is_ask_user != ask_user_first:
                 break
             active_pending.append(item)
         hitl.set_pending(hitl_pending)
         ask_user.set_pending(ask_pending)
         composer.display = not pending
         composer.set_enabled(self.input_enabled and not self.disabled)
-        composer.set_running_reply(self._latest_running_reply_id())
+        composer.set_running_reply(
+            next(reversed(self._active_messages), None),
+        )
         if ask_pending:
             self.call_later(ask_user.focus_action)
         elif hitl_pending:
             self.call_later(hitl.focus_action)
         else:
             self.call_later(composer.focus_editor)
-
-    @staticmethod
-    def _is_ask_user(tool_call: ToolCallBlock) -> bool:
-        return (
-            tool_call.name == _ASK_USER_TOOL_NAME
-            and tool_call.state == ToolCallState.SUBMITTED
-        )
 
     @on(Collapsible.Expanded)
     @on(Collapsible.Collapsed)

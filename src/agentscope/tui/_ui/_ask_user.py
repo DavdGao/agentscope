@@ -1,10 +1,6 @@
 # -*- coding: utf-8 -*-
 """Keyboard-first AskUser form for externally executed questions."""
 
-# Textual callbacks inherit their documentation from the owning widget.
-# pylint: disable=missing-function-docstring,protected-access
-# pylint: disable=attribute-defined-outside-init
-
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -19,9 +15,9 @@ from textual.message import Message
 from textual.widgets import Input, OptionList, Static
 from textual.widgets.option_list import Option
 
-from ..event import ExternalExecutionResultEvent
-from ..message import ToolCallBlock, ToolResultBlock, ToolResultState
-from ..tool import AskUserAnswer, AskUserMetadata, AskUserParams
+from ...event import ExternalExecutionResultEvent
+from ...message import ToolCallBlock, ToolResultBlock, ToolResultState
+from ...tool import AskUserAnswer, AskUserMetadata, AskUserParams
 
 
 @dataclass
@@ -34,6 +30,10 @@ class _Answer:
 
 class _QuestionOptions(OptionList):
     """Option list whose mouse hover follows its keyboard highlight."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.highlighted = None
 
     def _on_mouse_move(self, event: events.MouseMove) -> None:
         super()._on_mouse_move(event)
@@ -162,6 +162,7 @@ class AskUserUI(Vertical):
 
     def __init__(self) -> None:
         super().__init__(classes="as-ask-user")
+        self.display = True
         self._pending: list[tuple[str, str, ToolCallBlock]] = []
         self._params: AskUserParams | None = None
         self._answers: list[_Answer] = []
@@ -171,6 +172,7 @@ class AskUserUI(Vertical):
         self._error: str | None = None
 
     def compose(self) -> ComposeResult:
+        """Build the question form and its keyboard controls."""
         yield Static("─" * 4096, classes="as-ask-user-rule")
         yield Static(classes="as-ask-user-steps")
         yield Static(classes="as-ask-user-question")
@@ -193,41 +195,37 @@ class AskUserUI(Vertical):
         self,
         pending: list[tuple[str, str, ToolCallBlock]],
     ) -> None:
+        """Display the first pending question while preserving its answers."""
         previous_id = self._pending[0][2].id if self._pending else None
         current_id = pending[0][2].id if pending else None
         self._pending = pending
         self.display = bool(pending)
         if previous_id != current_id:
-            self._load_current()
+            self._params = None
+            self._answers = []
+            self._question_index = 0
+            self._editing_other = False
+            self._submitting = False
+            self._error = None
+            if not self._pending:
+                return
+            try:
+                self._params = AskUserParams.model_validate_json(
+                    self._pending[0][2].input,
+                )
+            except ValidationError as error:
+                self._error = (
+                    f"Invalid AskUser input: {error.errors()[0]['msg']}"
+                )
+            if self._params is not None:
+                self._answers = [_Answer() for _ in self._params.questions]
         if self.is_mounted and pending:
             self._render_form()
             if self._error is not None:
-                self.call_later(self._submit_invalid)
-
-    def _load_current(self) -> None:
-        self._params = None
-        self._answers = []
-        self._question_index = 0
-        self._editing_other = False
-        self._submitting = False
-        self._error = None
-        if not self._pending:
-            return
-        try:
-            self._params = AskUserParams.model_validate_json(
-                self._pending[0][2].input,
-            )
-        except ValidationError as error:
-            self._error = f"Invalid AskUser input: {error.errors()[0]['msg']}"
-        if self._params is not None:
-            self._answers = [_Answer() for _ in self._params.questions]
-
-    @property
-    def _question(self) -> Any:
-        assert self._params is not None
-        return self._params.questions[self._question_index]
+                self.call_later(self._submit)
 
     def focus_action(self) -> None:
+        """Focus the active answer editor or option list."""
         if not self.is_mounted or not self._pending:
             return
         if self._editing_other:
@@ -255,8 +253,28 @@ class AskUserUI(Vertical):
             return
 
         assert self._params is not None
-        question = self._question
-        steps.update(self._steps_text())
+        question = self._params.questions[self._question_index]
+        text = Text("←  ", style="dim")
+        for index, step_question in enumerate(self._params.questions):
+            answered = bool(
+                self._answers[index].selected
+                or self._answers[index].other is not None,
+            )
+            marker = "■" if answered else "□"
+            style = (
+                "bold #d8b66f underline"
+                if index == self._question_index
+                else "dim"
+            )
+            text.append(f"{marker} {step_question.header}", style=style)
+            text.append("  ")
+        submit_style = (
+            "bold #d8b66f"
+            if self._question_index == len(self._params.questions) - 1
+            else "dim"
+        )
+        text.append("✓ Submit  →", style=submit_style)
+        steps.update(text)
         question_widget.update(question.question)
         context_widget.display = bool(question.context)
         if question.context:
@@ -276,7 +294,6 @@ class AskUserUI(Vertical):
         other.display = self._editing_other
         other.disabled = self._submitting
         self._refresh_options()
-        self._update_preview()
         hint.update(
             "Submitting…"
             if self._submitting
@@ -290,78 +307,48 @@ class AskUserUI(Vertical):
             ),
         )
 
-    def _steps_text(self) -> Text:
-        assert self._params is not None
-        text = Text("←  ", style="dim")
-        for index, question in enumerate(self._params.questions):
-            answered = bool(
-                self._answers[index].selected
-                or self._answers[index].other is not None,
-            )
-            marker = "■" if answered else "□"
-            style = (
-                "bold #d8b66f underline"
-                if index == self._question_index
-                else "dim"
-            )
-            text.append(f"{marker} {question.header}", style=style)
-            text.append("  ")
-        submit_style = (
-            "bold #d8b66f"
-            if self._question_index == len(self._params.questions) - 1
-            else "dim"
-        )
-        text.append("✓ Submit  →", style=submit_style)
-        return text
-
-    def _option_prompt(self, index: int) -> Text:
-        question = self._question
-        highlighted = self.query_one(OptionList).highlighted == index
-        marker = "→" if highlighted else " "
-        if index < len(question.options):
-            option = question.options[index]
-            selected = (
-                option.label in self._answers[self._question_index].selected
-            )
-            checkbox = (
-                ("■ " if selected else "□ ") if question.multi_select else ""
-            )
-            prompt = Text(f"{marker} {index + 1}. {checkbox}")
-            prompt.append(
-                option.label,
-                style="bold #d8b66f" if highlighted else "",
-            )
-            prompt.append(f"\n     {option.description}", style="dim")
-            return prompt
-        if index == len(question.options):
-            prompt = Text(f"{marker} {index + 1}. ")
-            prompt.append(
-                "Type something.",
-                style="bold #d8b66f" if highlighted else "",
-            )
-            return prompt
-        prompt = Text(f"{marker} ✓ Continue")
-        if highlighted:
-            prompt.stylize("bold #d8b66f")
-        return prompt
-
     def _refresh_options(self) -> None:
         if self._params is None:
             return
         options = self.query_one(OptionList)
+        question = self._params.questions[self._question_index]
         for index in range(options.option_count):
-            options.replace_option_prompt_at_index(
-                index,
-                self._option_prompt(index),
-            )
-
-    def _update_preview(self) -> None:
+            highlighted = options.highlighted == index
+            marker = "→" if highlighted else " "
+            if index < len(question.options):
+                option = question.options[index]
+                selected = (
+                    option.label
+                    in self._answers[self._question_index].selected
+                )
+                checkbox = (
+                    ("■ " if selected else "□ ")
+                    if question.multi_select
+                    else ""
+                )
+                prompt = Text(f"{marker} {index + 1}. {checkbox}")
+                prompt.append(
+                    option.label,
+                    style="bold #d8b66f" if highlighted else "",
+                )
+                prompt.append(f"\n     {option.description}", style="dim")
+            elif index == len(question.options):
+                prompt = Text(f"{marker} {index + 1}. ")
+                prompt.append(
+                    "Type something.",
+                    style="bold #d8b66f" if highlighted else "",
+                )
+            else:
+                prompt = Text(f"{marker} ✓ Continue")
+                if highlighted:
+                    prompt.stylize("bold #d8b66f")
+            options.replace_option_prompt_at_index(index, prompt)
         preview = self.query_one(".as-ask-user-preview", Static)
         if self._editing_other or self._params is None:
             preview.display = False
             return
         highlighted = self.query_one(OptionList).highlighted
-        question = self._question
+        question = self._params.questions[self._question_index]
         value = (
             question.options[highlighted].preview
             if highlighted is not None
@@ -385,50 +372,33 @@ class AskUserUI(Vertical):
         self._submit()
 
     def _submit(self) -> None:
-        if self._submitting or not self._pending or self._params is None:
-            return
-        answers = [
-            AskUserAnswer(
-                question=question.question,
-                selected=answer.selected,
-                other=answer.other,
-            )
-            for question, answer in zip(
-                self._params.questions,
-                self._answers,
-                strict=True,
-            )
-        ]
-        metadata = AskUserMetadata(answers=answers).model_dump(mode="json")
-        lines = []
-        for answer in answers:
-            value = answer.other or ", ".join(answer.selected)
-            lines.append(f"{answer.question}\n{value}")
-        self._post_result(
-            output="\n\n".join(lines),
-            state=ToolResultState.SUCCESS,
-            metadata=metadata,
-        )
-
-    def _submit_invalid(self) -> None:
-        if self._error is None:
-            return
-        metadata = AskUserMetadata(answers=[]).model_dump(mode="json")
-        self._post_result(
-            output=self._error,
-            state=ToolResultState.ERROR,
-            metadata=metadata,
-        )
-
-    def _post_result(
-        self,
-        *,
-        output: str,
-        state: ToolResultState,
-        metadata: dict[str, Any],
-    ) -> None:
         if self._submitting or not self._pending:
             return
+        state = ToolResultState.SUCCESS
+        if self._error is not None:
+            state = ToolResultState.ERROR
+            metadata = AskUserMetadata(answers=[]).model_dump(mode="json")
+            output = self._error
+        else:
+            assert self._params is not None
+            answers = [
+                AskUserAnswer(
+                    question=question.question,
+                    selected=answer.selected,
+                    other=answer.other,
+                )
+                for question, answer in zip(
+                    self._params.questions,
+                    self._answers,
+                    strict=True,
+                )
+            ]
+            metadata = AskUserMetadata(answers=answers).model_dump(mode="json")
+            lines = []
+            for answer in answers:
+                value = answer.other or ", ".join(answer.selected)
+                lines.append(f"{answer.question}\n{value}")
+            output = "\n\n".join(lines)
         reply_id, _, tool_call = self._pending[0]
         result = ToolResultBlock(
             id=tool_call.id,
@@ -454,7 +424,7 @@ class AskUserUI(Vertical):
         if self._submitting or self._params is None:
             return
         option_id = str(event.option_id)
-        question = self._question
+        question = self._params.questions[self._question_index]
         answer = self._answers[self._question_index]
         if option_id.startswith("option:"):
             index = int(option_id.split(":", maxsplit=1)[1])
@@ -482,7 +452,6 @@ class AskUserUI(Vertical):
         if self._params is None or not self.display:
             return
         self._refresh_options()
-        self._update_preview()
 
     @on(Input.Submitted, ".as-ask-user-other")
     def _on_other_submitted(self, event: Input.Submitted) -> None:
@@ -495,6 +464,7 @@ class AskUserUI(Vertical):
         self._complete_question()
 
     def on_key(self, event: events.Key) -> None:
+        """Handle cancellation and navigation between questions."""
         if not self._pending or self._submitting:
             return
         if event.key == "ctrl+c":

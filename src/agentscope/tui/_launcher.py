@@ -23,7 +23,7 @@ from ..event import (
 )
 from ..message import AssistantMsg, Msg
 from ..pipeline import PipelineProtocol
-from ._chat import ChatUI
+from ._ui._chat import ChatUI
 
 _TUIInput: TypeAlias = (
     Msg

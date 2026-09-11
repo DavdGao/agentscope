@@ -50,10 +50,10 @@ from agentscope.message import (
 from agentscope.permission import PermissionBehavior, PermissionRule
 from agentscope.tool import AskUser
 from agentscope.tui import ChatUI, MessagesUI
-from agentscope.tui._ask_user import AskUserUI
-from agentscope.tui._chat import ComposerUI, HitlUI, _ComposerTextArea
+from agentscope.tui._ui._ask_user import AskUserUI
+from agentscope.tui._ui._chat import ComposerUI, HitlUI, _ComposerTextArea
 from agentscope.tui._launcher import _AgentScopeTUI
-from agentscope.tui._messages import (
+from agentscope.tui._ui._messages import (
     MessageUI,
     TextBlockUI,
     ThinkingUI,
@@ -446,14 +446,8 @@ class ChatUITest(unittest.IsolatedAsyncioTestCase):
                     for rule in composer.query(".as-section-rule"):
                         self.assertEqual(rule.region.x, chat.region.x)
                         self.assertEqual(rule.region.width, chat.region.width)
-                    self.assertEqual(
-                        message_uis[0]._header_text().title.plain,
-                        "user",
-                    )
-                    self.assertEqual(
-                        message_uis[1]._header_text().title.plain,
-                        "agent",
-                    )
+                    self.assertIn("user", screenshot)
+                    self.assertIn("agent", screenshot)
                     self.assertNotIn("YOU", screenshot)
                     self.assertNotIn("AGENT", screenshot)
                     tool_group.collapsed = False

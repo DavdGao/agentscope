@@ -2,9 +2,9 @@
 """Interactive terminal UI components for AgentScope."""
 
 try:
-    from ._chat import ChatUI
+    from ._ui._chat import ChatUI
     from ._launcher import launch_tui
-    from ._messages import MessagesUI
+    from ._ui._messages import MessagesUI
 except ImportError as error:
     if error.name == "textual":
         raise ImportError(
