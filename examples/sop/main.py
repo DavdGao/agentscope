@@ -415,7 +415,6 @@ async def build_sop(
                 ),
                 executor=director,
                 verifier=HumanApproval(),
-                step_id="storyboard",
             ),
             SOPStep(
                 subject="Blender 白膜动画",
@@ -427,7 +426,6 @@ async def build_sop(
                 ),
                 executor=blocker,
                 verifier=HumanApproval(),
-                step_id="animate",
             ),
             SOPStep(
                 subject="风格化上色",
@@ -438,7 +436,6 @@ async def build_sop(
                 ),
                 executor=colorist,
                 verifier=HumanApproval(),
-                step_id="restyle",
             ),
         ],
     )
@@ -486,12 +483,12 @@ async def main() -> None:
         await launch_tui(engine)
 
     print(f"\n== run {engine.phase.value}")
-    for step in sop.steps:
-        print(f"   {step.subject}: {engine.state.steps[step.id].phase.value}")
+    for step, record in zip(sop.steps, engine.state.steps):
+        print(f"   {step.subject}: {record.phase.value}")
 
     result = "".join(
         block.text
-        for block in (engine.state.steps["restyle"].submission or [])
+        for block in (engine.state.steps[-1].submission or [])
         if block.type == "text"
     )
     if result:
